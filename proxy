@@ -1,0 +1,194 @@
+#!/usr/bin/env python
+from socket import socket, AF_INET, SOCK_STREAM,SOL_SOCKET,SO_REUSEADDR,SOCK_DGRAM
+import sys
+import thread
+import select
+import time
+import re
+
+#process the raw request: adjust the bitrate and change .f4m to nolist.f4m
+def processR(request,T):
+    size = reqHeader(request)
+    rc = "/vod/"+str(size)+"Seg"
+    rd = "/vod/"+str(getBR(BR,T,size))+"Seg"
+    request1=request.replace(rc,rd)
+
+    re = "/vod/big_buck_bunny.f4m"
+    rf = "/vod/big_buck_bunny_nolist.f4m"
+    request2 = request1.replace(re,rf)
+    print "modified request~~~"+ request2
+    return request2
+
+#Get the best bitrate so far according to the current bandwidth
+#cite from : http://github.com/mukerjee/bitrate-projct.blob/master/proxy/proxy 
+def getBR(BR,tp,size):
+  if len(BR)>0:  
+    rate= BR[0]	
+    for i in BR:
+	if i*1.5 < tp:
+	   rate=i
+    return rate
+  else:
+    return size
+
+#parse the contentlength of the video chunk
+def parseContentLength(videoinfo):
+    try: 
+	match= re.search(r'Content-Length: \d*\r\n',videoinfo,re.I)
+	print "Content-Length"+match.group() 
+	size = int(match.group().split()[1])
+	return size
+    except:
+	return 0
+
+#Get the fragment bitrate of the origianl request
+def reqHeader(request):
+    try:
+	match= re.search(r'\d*Seg',request,re.I)
+	print"~~~~request header~~~"+ match.group()
+	size = match.group().split('Seg')[0]
+	print "SEGSIZE"+size 
+	return int(size)
+    except:
+	print "~~~~~~~~~~~~~~~~~~~~~~~~~wrong getting chunksize~~~~~~~~~~~~~~~~~~~~~"
+	return "1000Seg"
+
+#Get the video content size of the first piece which includes a header
+def firstchunk(videoinfo):
+    try:
+	size =len(videoinfo.split("\r\n\r\n")[1])
+	return size
+    except: 
+	return 0
+
+# write a line in the logfile
+def writeLog(LOG_FILE,duration,Tc,T,BR,webserverip,chunkname):
+    LOG_FILE.write(str(time.time())+" "+str(duration)+" "+str(Tc)+" "+str(T)+" "+str(BR)+" "+webserverip+" "+chunkname+ "\n")
+
+#check whether the content is a manifest or not
+def checkf4m(videoheader):
+    match= re.search(r'.f4m',videoheader,re.I)
+    if match:
+	print "find .f4m fileeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        print match.group()
+	return True
+    else:
+	return False
+
+#proxy main logic
+def handlerequest2(alpha,fakeip,clientSocket,addr,LOG_FILE, webserverip):
+    #create a new socket to connect to the server
+    proxyConnSocket = clientSocket
+    serverSocket = socket(AF_INET,SOCK_STREAM)
+    serverSocket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+    serverSocket.bind((fakeip,0))
+    serverSocket.connect((webserverip,8080))
+
+    #initialize parameters
+    request1=""
+    total =0
+    chunksize=0
+    T=0
+    Tp= 10
+    flag=0
+
+    #receive request from browser
+    #process the request
+    #send the server
+    #get reply from the server
+    #forward the reply to the browser
+    while True:
+	#Get request from the browser,modify the request if neccessary                
+	request = proxyConnSocket.recv(4096)	
+	print "unmodified request~~"+ request
+	ts=time.time()
+	if len(request)<=0:
+		print "No request received"		
+	else:
+		print "has request"	
+		request1= processR(request,T)
+		print "modified request"+ request1		
+		serverSocket.send(request1)
+		title= re.search(r'GET .+ HTTP',request1,re.I).group()
+		chunkname=title.split()[1]
+		print "chunkname is" + chunkname
+        #Get reply back from the server
+ 	print "~~~~reply~~~~"
+	#Get the first chunk which include header and parse the headerfile
+	videoinfo, serverAddress = serverSocket.recvfrom(4096)						
+	if len(videoinfo)==0: #check if error happen resend the modified request
+		serverSocket.send(request1)
+		videoinfo, serverAddress = serverSocket.recvfrom(4096)
+		print "resend request"+request1
+		break
+	chunkstime= time.time()
+	print "head of reply"+ videoinfo
+	chunksize=parseContentLength(videoinfo)
+	print "chunksize for video is"+ str(chunksize)
+	proxyConnSocket.send(videoinfo)
+     	total=firstchunk(videoinfo)
+	count=0
+	print" ~~~~~first chunk~~~~"+ str(total)
+	#Get the rest of the chunk from the server and forward back to the client
+	while total< chunksize:
+		videoinfo, serverAddress = serverSocket.recvfrom(4096)		
+		count=count+1
+		print"rest chunk"+ str(len(videoinfo))+" " +str(count)
+		proxyConnSocket.send(videoinfo)
+		total=total+len(videoinfo)
+	#calculate the throughput, update the throughput and update the logfile	
+	flag=0
+	tf=time.time()
+	duration=tf-chunkstime
+	Tc= chunksize*8/((tf-ts)*1000)
+	T= alpha*Tc+(1-alpha)*Tp
+	size = reqHeader(request)
+	writeLog(LOG_FILE,duration,Tc,T,getBR(BR,T,size),webserverip,chunkname)
+	Tp=T
+    serverSocket.close() 
+ 
+                                                         
+
+if __name__ == '__main__':
+    
+    #initialize variable, read from commandline and assign all the argument to parameters
+    global BR
+    log = sys.argv[1]
+    alpha = float(sys.argv[2])
+    proxyPort = int(sys.argv[3])
+    fakeip = sys.argv[4]
+    webserverip = sys.argv[5]
+    
+    #cite from : http://github.com/mukerjee/bitrate-projct.blob/master/proxy/proxy
+    #read the f4m file and parse the available content rate
+    try:
+    	f = open('/var/www/vod/big_buck_bunny.f4m').read()
+    	BR =[]
+    	r=[rate.start() for rate in re.finditer('bitrate=',f)]
+    	for i in r:
+		BR.append(int(float(f[i+9:].split('"')[0])))
+    	BR= sorted(BR)
+    	print BR
+    except:
+	BR=[10,100,500,1000]
+    ###################################################################3
+   
+    #create a logfile 
+    LOG_FILE = open(log,'w',0)
+	
+    #open a socket for listening to browser 
+    proxySocket = socket(AF_INET,SOCK_STREAM)
+    proxySocket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+    proxySocket.bind(('',proxyPort))
+    proxySocket.listen(0)
+    print 'The server is ready to receive'
+   
+    #after a client connects, start a new thread to connect to the server
+    while True:
+     
+	    print "~~~~~~~~~~~~~~~~~~~~new thread~~~~~~~~~~~~~~~"
+	    clientSocket, addr = proxySocket.accept()
+            thread.start_new_thread( handlerequest2, (alpha,fakeip,clientSocket,addr,LOG_FILE, webserverip,))
+      
+    proxySocket.close()
+            
