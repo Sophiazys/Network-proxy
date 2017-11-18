@@ -99,7 +99,7 @@ def handlerequest2(alpha,fakeip,clientSocket,addr,LOG_FILE, webserverip):
     #forward the reply to the browser
     while True:
 	#Get request from the browser,modify the request if neccessary                
-	request = proxyConnSocket.recv(4096)	
+        request = proxyConnSocket.recv(4096)	
 	print "unmodified request~~"+ request
 	ts=time.time()
 	if len(request)<=0:
